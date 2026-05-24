@@ -10,7 +10,10 @@ import torch.nn as nn
 import math
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 from peft import PeftModel, PeftConfig
-import bitsandbytes as bnb
+try:
+    import bitsandbytes as bnb
+except ImportError:
+    bnb = None
 from scipy.stats import entropy
 from functools import lru_cache
 import time
@@ -1006,6 +1009,12 @@ class ModelManager:
         
     def quantize_model(self, model):
         """Quantize model to 4-bit precision using bitsandbytes"""
+        if bnb is None:
+            raise ImportError(
+                "bitsandbytes is required for 4-bit quantization. "
+                "Install it with: pip install bitsandbytes"
+            )
+
         def _replace_linear_layers(module):
             for name, child in module.named_children():
                 if isinstance(child, torch.nn.Linear):

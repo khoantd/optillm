@@ -1,0 +1,33 @@
+# Docker-optimized dependencies for the full OptiLLM image.
+# torch is installed separately as a CPU wheel in the Dockerfile.
+numpy
+networkx
+openai
+z3-solver<=4.15.4.0
+sympy
+PyYAML
+aiohttp
+flask
+transformers
+azure.identity
+tiktoken
+scikit-learn
+litellm
+requests
+beautifulsoup4
+lxml
+selenium
+webdriver-manager
+presidio_analyzer
+presidio_anonymizer
+nbformat
+nbconvert
+peft
+outlines[transformers]>=1.2.3
+sentencepiece
+adaptive-classifier
+datasets
+mcp
+cerebras_cloud_sdk
+spacy>=3.7.0
+math-verify

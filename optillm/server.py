@@ -36,6 +36,11 @@ from optillm.cepo.cepo import cepo, CepoConfig, init_cepo_config
 from optillm.mars import multi_agent_reasoning_system
 from optillm.batching import RequestBatcher, BatchingError
 from optillm.conversation_logger import ConversationLogger
+from optillm.litellm_proxy import (
+    resolve_litellm_proxy_url,
+    resolve_litellm_proxy_api_key,
+    should_route_via_litellm_proxy,
+)
 import optillm.conversation_logger
 
 # Setup logging
@@ -83,7 +88,13 @@ def get_config():
         from optillm.inference import create_inference_client
         API_KEY = os.environ.get("OPTILLM_API_KEY")
         default_client = create_inference_client()
-    # Cerebras, OpenAI, Azure, or LiteLLM API configuration
+    elif should_route_via_litellm_proxy(server_config):
+        # Remote LiteLLM proxy (OpenAI-compatible HTTP API)
+        proxy_url = resolve_litellm_proxy_url(server_config)
+        API_KEY = resolve_litellm_proxy_api_key()
+        default_client = OpenAI(api_key=API_KEY, base_url=proxy_url, http_client=http_client)
+        logger.info(f"Routing inference through LiteLLM proxy at {proxy_url}")
+    # Cerebras, OpenAI, Azure, or LiteLLM SDK configuration
     elif os.environ.get("CEREBRAS_API_KEY"):
         API_KEY = os.environ.get("CEREBRAS_API_KEY")
         base_url = server_config['base_url']
@@ -122,10 +133,17 @@ def get_config():
                 http_client=http_client
             )
     else:
-        # Import the LiteLLM wrapper
+        # LiteLLM Python SDK (direct providers, or SDK → proxy if base_url set)
         from optillm.litellm_wrapper import LiteLLMWrapper
-        default_client = LiteLLMWrapper()
-        logger.info("Created LiteLLMWrapper as fallback")
+        proxy_url = resolve_litellm_proxy_url(server_config)
+        default_client = LiteLLMWrapper(
+            api_key=resolve_litellm_proxy_api_key(),
+            base_url=proxy_url or None,
+        )
+        if proxy_url:
+            logger.info(f"Created LiteLLMWrapper targeting proxy at {proxy_url}")
+        else:
+            logger.info("Created LiteLLMWrapper as fallback (direct provider SDK)")
     logger.info(f"Client type: {type(default_client)}")
     return default_client, API_KEY
 
@@ -756,7 +774,7 @@ def proxy():
     if optillm_approach != "auto":
         model = f"{optillm_approach}-{model}"
 
-    base_url = server_config['base_url']
+    base_url = resolve_litellm_proxy_url(server_config)
     default_client, api_key = get_config()
 
     operation, approaches, model = parse_combined_approach(model, known_approaches, plugin_approaches)
@@ -945,8 +963,9 @@ def proxy_models():
     logger.info('Received request to /v1/models')
     default_client, API_KEY = get_config()
     try:
-        if server_config['base_url']:
-            client = OpenAI(api_key=API_KEY, base_url=server_config['base_url'])
+        proxy_url = resolve_litellm_proxy_url(server_config)
+        if proxy_url:
+            client = OpenAI(api_key=API_KEY or resolve_litellm_proxy_api_key(), base_url=proxy_url)
             # For external API, fetch models using the OpenAI client
             models_response = client.models.list()
             # Convert to dict format
@@ -974,6 +993,39 @@ def proxy_models():
     except Exception as e:
         logger.error(f"Error fetching models: {str(e)}")
         return jsonify({"error": f"Error fetching models: {str(e)}"}), 500
+
+@app.route('/', methods=['GET'])
+def index():
+    payload = {
+        "service": "OptiLLM",
+        "status": "ok",
+        "endpoints": {
+            "health": "/health",
+            "models": "/v1/models",
+            "chat_completions": "/v1/chat/completions",
+        },
+    }
+    gui_url = server_config.get("gui_url")
+    if gui_url:
+        payload["gui"] = gui_url
+    return jsonify(payload), 200
+
+
+@app.route('/v1', methods=['GET'])
+def v1_index():
+    return jsonify({
+        "object": "list",
+        "data": [
+            {"id": "models", "path": "/v1/models", "method": "GET"},
+            {"id": "chat.completions", "path": "/v1/chat/completions", "method": "POST"},
+        ],
+    }), 200
+
+
+@app.route('/favicon.ico', methods=['GET'])
+def favicon():
+    return "", 204
+
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -1037,7 +1089,8 @@ def parse_args():
     # Special handling for base_url to support both formats
     base_url_default = os.environ.get("OPTILLM_BASE_URL", "")
     parser.add_argument("--base-url", "--base_url", dest="base_url", type=str, default=base_url_default,
-                        help="Base url for OpenAI compatible endpoint")
+                        help="Upstream OpenAI-compatible endpoint (e.g. remote LiteLLM proxy). "
+                             "Also set LITELLM_PROXY_URL / LITELLM_API_KEY for dedicated proxy mode.")
 
     # SSL configuration arguments
     ssl_verify_default = os.environ.get("OPTILLM_SSL_VERIFY", "true").lower() in ("true", "1", "yes")
@@ -1288,6 +1341,8 @@ def main():
 
             # Configure the base URL for the Gradio interface
             base_url = f"http://localhost:{port}/v1"
+            gui_port = int(os.environ.get("OPTILLM_GUI_PORT", 7860))
+            server_config["gui_url"] = f"http://{host}:{gui_port}"
             logger.info(f"Launching Gradio interface connected to {base_url}")
 
             # Create custom chat function with extended timeout
@@ -1329,7 +1384,7 @@ def main():
                 description=f"Connected to OptILLM proxy at {base_url}"
             )
             demo.queue()  # Enable queue to handle long operations properly
-            demo.launch(server_name=host, share=False)
+            demo.launch(server_name=host, server_port=gui_port, share=False)
         except ImportError:
             logger.error("Gradio is required for GUI. Install it with: pip install gradio")
             return

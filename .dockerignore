@@ -1,6 +1,9 @@
 .git/
 .gitignore
 .github/
+.claude/
+.cursor/
+.codegraph/
 __pycache__/
 *.pyc
 *.pyo
@@ -29,3 +32,12 @@ venv/
 ENV/
 .idea/
 .vscode/
+tests/
+scripts/
+AGENTS.md
+CLAUDE.md
+docker-compose.yaml
+Dockerfile*
+requirements_proxy_only.txt
+*.md
+!README.md

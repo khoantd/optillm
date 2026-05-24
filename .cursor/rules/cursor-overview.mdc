@@ -1,0 +1,35 @@
+---
+description: "Cursor agent workflow, principles, and where project guidance lives"
+alwaysApply: true
+---
+
+# Cursor agent — project workflow
+
+This repo mirrors Claude Code’s `.claude/` layout under **`.cursor/`** for Cursor (Composer, Agent, inline Chat).
+
+## Development workflow
+
+Use the same phase order as in `.cursor/CURSOR.md`:
+
+1. **Define** — prompt from `.cursor/commands/spec.md` (paste or attach)
+2. **Plan** — `.cursor/commands/plan.md`
+3. **Build** — `.cursor/commands/build.md` (TDD: `.cursor/skills/tdd/`)
+4. **Verify** — `.cursor/commands/test.md`
+5. **Review** — `.cursor/commands/review.md` (five-axis: `.cursor/skills/code-review/`)
+6. **Ship** — `.cursor/commands/deploy.md`
+
+Supporting prompts: `debug`, `simplify`, `fix-issue` in `.cursor/commands/`.
+
+## Mandatory standards
+
+- Follow **`.cursor/rules/`** (`.mdc`). **`security.mdc`** is always applied; other rule files apply when matching globs are in scope (see each file’s frontmatter).
+- Prefer **tests first** and **small vertical slices** (see `.cursor/skills/incremental-implementation/`).
+- Use **`.cursor/references/`** for checklists (security, testing, performance, accessibility).
+
+## Agents (personas)
+
+Specialized instructions live in **`.cursor/agents/`**. In Cursor, **@ mention** the file you want (e.g. `@.cursor/agents/code-reviewer.md`) when you need that role.
+
+## Relation to `.claude/`
+
+If both folders exist: **`.claude/`** targets Claude Code; **`.cursor/`** targets Cursor. Keep them aligned when you change workflows or standards.

@@ -20,23 +20,52 @@ SAFETY_SETTINGS = [
 
 class LiteLLMWrapper:
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
-        self.api_key = api_key
-        self.base_url = base_url
-        self.chat = self.Chat()
+        from optillm.litellm_proxy import normalize_openai_base_url, resolve_litellm_proxy_api_key
+
+        self.api_key = api_key or resolve_litellm_proxy_api_key()
+        self.base_url = normalize_openai_base_url(base_url or "") if base_url else ""
+        self.chat = self.Chat(self)
         # litellm.set_verbose=True
 
+    def _completion_kwargs(self) -> Dict[str, Any]:
+        """Route SDK calls through a remote LiteLLM proxy when base_url is configured."""
+        kwargs: Dict[str, Any] = {}
+        if self.base_url:
+            kwargs["api_base"] = self.base_url
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        return kwargs
+
     class Chat:
+        def __init__(self, parent: "LiteLLMWrapper"):
+            self._parent = parent
+
         class Completions:
-            @staticmethod
-            def create(model: str, messages: List[Dict[str, str]], **kwargs):
+            def __init__(self, parent: "LiteLLMWrapper"):
+                self._parent = parent
+
+            def create(self, model: str, messages: List[Dict[str, str]], **kwargs):
+                proxy_kwargs = self._parent._completion_kwargs()
                 if model.startswith("gemini"):
-                    response = completion(model=model, messages=messages, **kwargs, safety_settings=SAFETY_SETTINGS)
+                    response = completion(
+                        model=model,
+                        messages=messages,
+                        **proxy_kwargs,
+                        **kwargs,
+                        safety_settings=SAFETY_SETTINGS,
+                    )
                 else:
-                    response = completion(model=model, messages=messages, **kwargs)
-                # Convert LiteLLM response to match OpenAI response structure
+                    response = completion(
+                        model=model,
+                        messages=messages,
+                        **proxy_kwargs,
+                        **kwargs,
+                    )
                 return response
 
-        completions = Completions()
+        @property
+        def completions(self):
+            return self.Completions(self._parent)
 
     class Models:
         @staticmethod

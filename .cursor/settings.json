@@ -1,0 +1,8 @@
+{
+  "rules_dir": ".cursor/rules",
+  "commands_dir": ".cursor/commands",
+  "skills_dir": ".cursor/skills",
+  "agents_dir": ".cursor/agents",
+  "references_dir": ".cursor/references",
+  "note": "Parallels .claude/settings.json. Cursor loads .cursor/rules/*.mdc automatically; other paths are for @ mentions and docs."
+}
