@@ -255,7 +255,7 @@ server_config = {
     'ssl_cert_path': '',
     'auto_router_enabled': True,
     'auto_router_effort': 0.7,
-    'auto_router_min_confidence': 0.30,
+    'auto_router_min_confidence': 0.20,
 }
 
 # List of known approaches
@@ -610,33 +610,46 @@ def execute_n_times(n: int, approaches, operation: str, system_prompt: str, init
         return responses[0], total_tokens
     return responses, total_tokens
 
-def generate_streaming_response(final_response, model):
-    # Generate a unique response ID
+def generate_streaming_response(final_response, model, optillm_routing=None):
+    """Yield OpenAI-style SSE chunks, streaming reasoning before the final answer."""
+    from optillm.reasoning_trace import chunk_text, split_thinking_and_answer
+
     response_id = f"chatcmpl-{int(time.time()*1000)}"
     created = int(time.time())
 
-    # Yield the final response with OpenAI-compatible format
-    if isinstance(final_response, list):
-        for index, response in enumerate(final_response):
-            # First chunk includes role
-            yield "data: " + json.dumps({
-                "id": response_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{"delta": {"role": "assistant", "content": response}, "index": index, "finish_reason": "stop"}],
-            }) + "\n\n"
-    else:
-        # First chunk includes role
-        yield "data: " + json.dumps({
+    def _emit(*, delta, index=0, finish_reason=None, extra=None):
+        payload = {
             "id": response_id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": model,
-            "choices": [{"delta": {"role": "assistant", "content": final_response}, "index": 0, "finish_reason": "stop"}],
-        }) + "\n\n"
+            "choices": [{"delta": delta, "index": index, "finish_reason": finish_reason}],
+        }
+        if extra:
+            payload.update(extra)
+        return "data: " + json.dumps(payload) + "\n\n"
 
-    # Yield the final message to indicate the stream has ended
+    if isinstance(final_response, list):
+        for index, response in enumerate(final_response):
+            text = response if isinstance(response, str) else str(response)
+            split = split_thinking_and_answer(text)
+            yield _emit(delta={"role": "assistant"}, index=index)
+            for piece in chunk_text(split.thinking):
+                yield _emit(delta={"reasoning_content": piece}, index=index)
+            for piece in chunk_text(split.answer):
+                yield _emit(delta={"content": piece}, index=index)
+            yield _emit(delta={}, index=index, finish_reason="stop")
+    else:
+        text = final_response if isinstance(final_response, str) else str(final_response)
+        split = split_thinking_and_answer(text)
+        yield _emit(delta={"role": "assistant"}, index=0)
+        for piece in chunk_text(split.thinking):
+            yield _emit(delta={"reasoning_content": piece}, index=0)
+        for piece in chunk_text(split.answer):
+            yield _emit(delta={"content": piece}, index=0)
+        extra = {"optillm_routing": optillm_routing} if optillm_routing else None
+        yield _emit(delta={}, index=0, finish_reason="stop", extra=extra)
+
     yield "data: [DONE]\n\n"
 
 def extract_contents(response_obj):
@@ -832,7 +845,7 @@ def proxy():
         request_config=request_config,
         auto_router_enabled=server_config.get('auto_router_enabled', True),
         default_router_effort=server_config.get('auto_router_effort', 0.7),
-        default_router_min_confidence=server_config.get('auto_router_min_confidence', 0.30),
+        default_router_min_confidence=server_config.get('auto_router_min_confidence', 0.20),
         known_approaches=known_approaches,
         plugin_approaches=plugin_approaches,
         parse_combined_approach=parse_combined_approach,
@@ -932,7 +945,12 @@ def proxy():
             if stream:
                 if request_id:
                     logger.info(f'Request {request_id}: Completed (streaming response)')
-                return Response(generate_streaming_response(extract_contents(result), model), content_type='text/event-stream')
+                return Response(
+                    generate_streaming_response(
+                        extract_contents(result), model, optillm_routing=optillm_routing
+                    ),
+                    content_type='text/event-stream',
+                )
             else :
                 if request_id:
                     logger.info(f'Request {request_id}: Completed')
@@ -955,7 +973,12 @@ def proxy():
             if stream:
                 if request_id:
                     logger.info(f'Request {request_id}: Completed (streaming response)')
-                return Response(generate_streaming_response(extract_contents(response), model), content_type='text/event-stream')
+                return Response(
+                    generate_streaming_response(
+                        extract_contents(response), model, optillm_routing=optillm_routing
+                    ),
+                    content_type='text/event-stream',
+                )
             else:
                 if request_id:
                     logger.info(f'Request {request_id}: Completed')
@@ -987,7 +1010,10 @@ def proxy():
             response = messages[-1]['content']
 
     if stream:
-        return Response(generate_streaming_response(response, model), content_type='text/event-stream')
+        return Response(
+            generate_streaming_response(response, model, optillm_routing=optillm_routing),
+            content_type='text/event-stream',
+        )
     else:
         # Calculate reasoning tokens from the response
         reasoning_tokens = 0

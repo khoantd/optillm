@@ -6,6 +6,7 @@ This directory contains tests for the OptiLLM project.
 
 - `test.py` - Main comprehensive test suite for all OptiLLM approaches
 - `test_cases.json` - Test cases for the main test suite
+- `GUI_TESTING.md` - How to test techniques in the Gradio GUI (manual vs auto routing)
 - `test_plugins.py` - Unit tests for plugin functionality
 - `test_api_compatibility.py` - Tests for OpenAI API compatibility
 - `test_n_parameter.py` - Tests for n parameter functionality (multiple completions)
@@ -56,6 +57,10 @@ pytest tests/ -v
 # Run with coverage
 pytest tests/ --cov=optillm --cov-report=html
 ```
+
+## GUI testing
+
+If you use `optillm --gui`, read **[GUI_TESTING.md](GUI_TESTING.md)** before trying approach slugs with **Auto**. It maps each technique to rows in `test_cases.json` and explains when the ML router falls back to `none`.
 
 ## Main Test Suite
 
