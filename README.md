@@ -35,6 +35,7 @@ It is possible to beat the frontier models using these techniques across diverse
 - **📦 Zero Training Required**: Just proxy your existing API calls through OptiLLM
 - **⚡ Production Ready**: Used in production by companies and researchers worldwide
 - **🌍 Multi-Provider**: Supports OpenAI, Anthropic, Google, Cerebras, and 100+ models via LiteLLM
+- **🧭 Predictive routing**: With `--approach auto`, a ModernBERT classifier picks the best technique per prompt (or use `predict` to force it)
 
 ## 🚀 Quick Start
 
@@ -65,6 +66,17 @@ response = client.chat.completions.create(
 
 **Before OptiLLM**: "x = 1" ❌  
 **After OptiLLM**: "Let me work through this step by step: 2x + 3 = 7, so 2x = 4, therefore x = 2" ✅
+
+With the default `--approach auto`, you can also let OptiLLM **choose** the technique for each request:
+
+```python
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Prove that sqrt(2) is irrational."}],
+    extra_body={"optillm_approach": "auto"},  # server default; ML routing when no override
+)
+# Response JSON includes optillm_routing, e.g. resolved_approach, confidence, source
+```
 
 ## 📊 Proven Results
 
@@ -188,7 +200,7 @@ optillm
 | [Long-Context Cerebras Planning and Optimization](optillm/plugins/longcepo)              | `longcepo`              | Combines planning and divide-and-conquer processing of long documents to enable infinite context  |
 | Majority Voting         | `majority_voting`  | Generates k candidate solutions and selects the most frequent answer through majority voting (default k=6) |
 | MCP Client              | `mcp`              | Implements the model context protocol (MCP) client, enabling you to use any LLM with any MCP Server  |
-| Router                  | `router`           | Uses the [optillm-modernbert-large](https://huggingface.co/codelion/optillm-modernbert-large) model to route requests to different approaches based on the user prompt |
+| Router                  | `router`           | Same ML router as `auto`/`predict` ([optillm-modernbert-large](https://huggingface.co/codelion/optillm-modernbert-large)); use as an explicit plugin slug (`optillm_approach: router`) |
 | Chain-of-Code           | `coc`              | Implements a chain of code approach that combines CoT with code execution and LLM based code simulation |
 | Memory                  | `memory`           | Implements a short term memory layer, enables you to use unbounded context length with any LLM |
 | Privacy                 | `privacy`          | Anonymize PII data in request and deanonymize it back to original value in response            |
@@ -251,9 +263,24 @@ response = client.chat.completions.create(
 print(response)
 ```
 The code above applies to both OpenAI and Azure OpenAI, just remember to populate the `OPENAI_API_KEY` env variable with the proper key.
-There are multiple ways to control the optimization techniques, they are applied in the follow order of preference:
 
-- You can control the technique you use for optimization by prepending the slug to the model name `{slug}-model-name`. E.g. in the above code we are using `moa` or mixture of agents as the optimization approach. In the proxy logs you will see the following showing the `moa` is been used with the base model as `gpt-4o-mini`.
+There are multiple ways to control which optimization technique runs. **When the server uses `--approach auto` (default)**, overrides are applied in this order (highest priority first):
+
+| Priority | How you set the approach | Predictive router runs? |
+|----------|--------------------------|-------------------------|
+| 1 | Model prefix, e.g. `moa-gpt-4o-mini` | No |
+| 2 | Prompt tags, e.g. `<optillm_approach>re2</optillm_approach>` | No |
+| 3 | `extra_body.optillm_approach` set to a concrete slug (not `auto` / `predict`) | No |
+| 4 | `extra_body.optillm_approach: "predict"` | Yes (always) |
+| 5 | `extra_body.optillm_approach: "auto"` or server default `auto`, no override above | Yes (if `--auto-router` enabled) |
+| 6 | Otherwise | Direct proxy (`none`) |
+
+If the server is started with a **fixed** approach (e.g. `--approach moa`), client-side prefixes and `optillm_approach` in `extra_body` do not apply; use the model name only in requests.
+
+**Manual selection** (any server mode when using `auto` on the server):
+
+- Prepend the slug to the model name `{slug}-model-name`. E.g. `moa-gpt-4o-mini` uses mixture of agents with base model `gpt-4o-mini`. Proxy logs show the resolved approach:
+
 
 ```bash
 2024-09-06 08:35:32,597 - INFO - Using approach moa, with gpt-4o-mini
@@ -287,7 +314,88 @@ response = client.chat.completions.create(
 > You can also combine different techniques either by using symbols `&` and `|`. When you use `&` the techniques are processed in the order from left to right in a pipeline
 > with response from previous stage used as request to the next. While, with `|` we run all the requests in parallel and generate multiple responses that are returned as a list.
 
-Please note that the convention described above works only when the optillm server has been started with inference approach set to `auto`. Otherwise, the `model` attribute in the client request must be set with the model name only.
+### Predictive auto-routing (`auto` and `predict`)
+
+Implementation lives in [`optillm/approach_router/`](optillm/approach_router/). The server loads [optillm-modernbert-large](https://huggingface.co/codelion/optillm-modernbert-large) **once per process** (shared with the `router` plugin).
+
+#### Modes
+
+| Mode | Client / server setting | Behavior |
+|------|-------------------------|----------|
+| **`auto`** | Default `--approach auto` | Run the classifier when no higher-priority override applies (see table above). |
+| **`predict`** | `extra_body={"optillm_approach": "predict"}` | Always run the classifier; strips any approach prefix from the model name before prediction. |
+
+#### Server configuration
+
+```bash
+# Default: ML routing enabled for auto mode
+optillm --approach auto --auto-router --auto-router-effort 0.7
+
+# Passthrough only (no classifier) while keeping auto client convention
+export OPTILLM_AUTO_ROUTER=false
+optillm --approach auto
+```
+
+| Flag / env | Description | Default |
+|------------|-------------|---------|
+| `--approach` / `OPTILLM_APPROACH` | `auto`, `predict`, or a technique slug | `auto` |
+| `--auto-router` / `OPTILLM_AUTO_ROUTER` | Enable classifier when mode is `auto` | `true` |
+| `--auto-router-effort` / `OPTILLM_AUTO_ROUTER_EFFORT` | Effort input to the classifier (0–1) | `0.7` |
+
+#### Per-request tuning (`extra_body`)
+
+```python
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Prove that sqrt(2) is irrational."}],
+    extra_body={
+        "optillm_approach": "predict",  # or "auto"
+        "optillm_auto_router": {
+            "effort": 0.7,           # classifier effort (0–1)
+            "min_confidence": 0.5,   # below this → fallback approach
+            "fallback": "none",      # used on low confidence or model failure
+        },
+    },
+)
+```
+
+#### Response metadata (`optillm_routing`)
+
+Non-streaming JSON completions include an extension field explaining the routing decision:
+
+```json
+{
+  "optillm_routing": {
+    "requested_mode": "auto",
+    "resolved_approach": "moa",
+    "confidence": 0.82,
+    "source": "ml",
+    "model": "codelion/optillm-modernbert-large"
+  }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `requested_mode` | `auto` or `predict` (omitted if routing was skipped) |
+| `resolved_approach` | Technique slug actually used |
+| `confidence` | Classifier softmax score for the chosen label |
+| `source` | `ml` or `fallback` (model load/inference failure or below `min_confidence`) |
+| `model` | Hugging Face id of the router weights |
+
+Server logs include the same fields (without prompt text), e.g. `Approach routing: mode=auto resolved=moa confidence=0.82 source=ml`.
+
+#### ML label coverage
+
+The classifier is trained for: `none`, `mcts`, `bon`, `moa`, `rto`, `z3`, `self_consistency`, `pvg`, `rstar`, `cot_reflection`, `plansearch`, `leap`, `re2`.
+
+**Not covered by the classifier** (set explicitly via prefix, tags, or `extra_body`): `cepo`, `mars`, and all [plugins](#implemented-plugins). Retrain or extend the model to add labels.
+
+#### Operational notes
+
+- **Cold start:** The first routed request may take several seconds while weights download and load.
+- **Streaming:** `optillm_routing` is attached to non-streaming JSON responses; streaming responses do not include it yet.
+- **Dependencies:** Requires `torch`, `transformers`, `safetensors`, and `huggingface_hub` (included in default installs).
 
 We now support all LLM providers (by wrapping around the [LiteLLM sdk](https://docs.litellm.ai/docs/#litellm-python-sdk)). E.g. you can use the Gemini Flash model with `moa` by setting passing the api key in the environment variable `os.environ['GEMINI_API_KEY']` and then calling the model `moa-gemini/gemini-1.5-flash-002`. In the output you will then see that LiteLLM is being used to call the base model.
 
@@ -658,7 +766,9 @@ optillm supports various command-line arguments for configuration. When using Do
 
 | Parameter                | Description                                                     | Default Value   |
 |--------------------------|-----------------------------------------------------------------|-----------------|
-| `--approach`             | Inference approach to use                                       | `"auto"`        |
+| `--approach`             | Inference approach: `auto` (ML when eligible), `predict` (always ML), or a technique/plugin slug | `"auto"` |
+| `--auto-router`          | Enable ML routing when approach is `auto` (see [Predictive auto-routing](#predictive-auto-routing-auto-and-predict)) | `true` |
+| `--auto-router-effort`   | Effort input for the approach router model (0–1)                  | `0.7`           |
 | `--simulations`          | Number of MCTS simulations                                      | 2               |
 | `--exploration`          | Exploration weight for MCTS                                     | 0.2             |
 | `--depth`                | Simulation depth for MCTS                                       | 1               |
@@ -733,6 +843,11 @@ When using Docker, you can set these parameters as environment variables. For ex
 ```bash
 OPTILLM_APPROACH=mcts
 OPTILLM_MODEL=gpt-4
+
+# Predictive routing (default server mode)
+OPTILLM_APPROACH=auto
+OPTILLM_AUTO_ROUTER=true
+OPTILLM_AUTO_ROUTER_EFFORT=0.7
 ```
 
 To secure the optillm proxy with an API key, set the `OPTILLM_API_KEY` environment variable:

@@ -41,6 +41,8 @@ from optillm.litellm_proxy import (
     resolve_litellm_proxy_api_key,
     should_route_via_litellm_proxy,
 )
+from optillm.approach_router import ROUTING_MODES
+from optillm.approach_router.resolver import resolve_optillm_approach, attach_optillm_routing
 import optillm.conversation_logger
 
 # Setup logging
@@ -213,6 +215,8 @@ server_config = {
     'log': 'info',
     'ssl_verify': True,
     'ssl_cert_path': '',
+    'auto_router_enabled': True,
+    'auto_router_effort': 0.7,
 }
 
 # List of known approaches
@@ -697,6 +701,7 @@ def extract_optillm_approach(content):
         return content, approach
     return content, None
 
+
 # Optional API key configuration to secure the proxy
 @app.before_request
 def check_api_key():
@@ -760,7 +765,9 @@ def proxy():
     elif max_tokens is not None:
         request_config['max_tokens'] = max_tokens
 
+    request_has_explicit_approach = 'optillm_approach' in data
     optillm_approach = data.get('optillm_approach', server_config['approach'])
+    requested_routing_mode = optillm_approach if optillm_approach in ROUTING_MODES else None
     logger.debug(data)
     server_config['mcts_depth'] = data.get('mcts_depth', server_config['mcts_depth'])
     server_config['mcts_exploration'] = data.get('mcts_exploration', server_config['mcts_exploration'])
@@ -771,8 +778,33 @@ def proxy():
     if message_optillm_approach:
         optillm_approach = message_optillm_approach
 
-    if optillm_approach != "auto":
-        model = f"{optillm_approach}-{model}"
+    raw_model = model
+    resolved_approach, model, optillm_routing = resolve_optillm_approach(
+        optillm_approach=optillm_approach,
+        raw_model=raw_model,
+        system_prompt=system_prompt,
+        initial_query=initial_query,
+        message_optillm_approach=message_optillm_approach,
+        request_has_explicit_approach=request_has_explicit_approach,
+        request_config=request_config,
+        auto_router_enabled=server_config.get('auto_router_enabled', True),
+        default_router_effort=server_config.get('auto_router_effort', 0.7),
+        known_approaches=known_approaches,
+        plugin_approaches=plugin_approaches,
+        parse_combined_approach=parse_combined_approach,
+    )
+
+    if optillm_routing:
+        logger.info(
+            "Approach routing: mode=%s resolved=%s confidence=%s source=%s",
+            optillm_routing.get('requested_mode'),
+            optillm_routing.get('resolved_approach'),
+            optillm_routing.get('confidence'),
+            optillm_routing.get('source'),
+        )
+
+    if resolved_approach not in ROUTING_MODES:
+        model = f"{resolved_approach}-{model}"
 
     base_url = resolve_litellm_proxy_url(server_config)
     default_client, api_key = get_config()
@@ -829,7 +861,7 @@ def proxy():
 
                 logger.debug("Routing request to batch processor")
                 result = request_batcher.add_request(batch_request_data)
-                return jsonify(result), 200
+                return jsonify(attach_optillm_routing(result, optillm_routing)), 200
 
             except BatchingError as e:
                 logger.error(f"Batch processing failed: {e}")
@@ -856,7 +888,7 @@ def proxy():
             else :
                 if request_id:
                     logger.info(f'Request {request_id}: Completed')
-                return jsonify(result), 200
+                return jsonify(attach_optillm_routing(result, optillm_routing)), 200
 
         elif operation == 'AND' or operation == 'OR':
             if contains_none:
@@ -879,7 +911,7 @@ def proxy():
             else:
                 if request_id:
                     logger.info(f'Request {request_id}: Completed')
-                return jsonify(response), 200
+                return jsonify(attach_optillm_routing(response, optillm_routing)), 200
 
     except Exception as e:
         # Log error to conversation logger if enabled
@@ -947,6 +979,8 @@ def proxy():
                 },
                 'finish_reason': 'stop'
             })
+
+        response_data = attach_optillm_routing(response_data, optillm_routing)
 
         # Log the final response and finalize conversation logging
         if conversation_logger and request_id:
@@ -1046,7 +1080,9 @@ def parse_args():
     # Define arguments and their corresponding environment variables
     args_env = [
         ("--optillm-api-key", "OPTILLM_API_KEY", str, "", "Optional API key for client authentication to optillm"),
-        ("--approach", "OPTILLM_APPROACH", str, "auto", "Inference approach to use", known_approaches + list(plugin_approaches.keys())),
+        ("--approach", "OPTILLM_APPROACH", str, "auto", "Inference approach to use (auto, predict, or a technique slug)", ["auto", "predict"] + known_approaches + list(plugin_approaches.keys())),
+        ("--auto-router", "OPTILLM_AUTO_ROUTER", bool, True, "Enable ML routing when approach is auto"),
+        ("--auto-router-effort", "OPTILLM_AUTO_ROUTER_EFFORT", float, 0.7, "Effort input for the approach router model (0-1)"),
         ("--mcts-simulations", "OPTILLM_SIMULATIONS", int, 2, "Number of MCTS simulations"),
         ("--mcts-exploration", "OPTILLM_EXPLORATION", float, 0.2, "Exploration weight for MCTS"),
         ("--mcts-depth", "OPTILLM_DEPTH", int, 1, "Simulation depth for MCTS"),
@@ -1157,6 +1193,8 @@ def main():
     args = parse_args()
     # Update server_config with all argument values
     server_config.update(vars(args))
+    if 'auto_router' in server_config:
+        server_config['auto_router_enabled'] = server_config.pop('auto_router')
 
     port = server_config['port']
 

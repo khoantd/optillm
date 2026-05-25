@@ -25,6 +25,8 @@ dependencies = [
     "flask",
     "torch",
     "transformers",
+    "safetensors",
+    "huggingface_hub",
     "azure-identity",
     "tiktoken",
     "scikit-learn",
