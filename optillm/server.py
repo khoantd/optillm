@@ -48,6 +48,44 @@ import optillm.conversation_logger
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Request fields handled by the proxy; must not reach provider chat.completions.create().
+OPTILLM_PROXY_ONLY_KEYS = frozenset({
+    "optillm_approach",
+    "optillm_auto_router",
+    "optillm_auto_router_effort",
+    "mcts_depth",
+    "mcts_exploration",
+    "mcts_simulations",
+    "proxy_wrap",
+    "wrapped_approach",
+    "wrap",
+    "best_of_n",
+    "rstar_max_depth",
+    "rstar_num_rollouts",
+    "rstar_c",
+    "extra_body",
+})
+
+
+def normalize_request_data(data: Optional[dict]) -> dict:
+    """Flatten nested extra_body into the top-level request payload."""
+    if not data:
+        return {}
+    normalized = dict(data)
+    extra_body = normalized.pop("extra_body", None)
+    if isinstance(extra_body, dict):
+        for key, value in extra_body.items():
+            normalized.setdefault(key, value)
+    return normalized
+
+
+def strip_optillm_proxy_keys(request_config: Optional[dict]) -> None:
+    """Remove OptiLLM-only keys before forwarding kwargs to a provider client."""
+    if not request_config:
+        return
+    for key in OPTILLM_PROXY_ONLY_KEYS:
+        request_config.pop(key, None)
 logging_levels = {
     "notset": logging.NOTSET,
     "debug": logging.DEBUG,
@@ -217,6 +255,7 @@ server_config = {
     'ssl_cert_path': '',
     'auto_router_enabled': True,
     'auto_router_effort': 0.7,
+    'auto_router_min_confidence': 0.30,
 }
 
 # List of known approaches
@@ -420,6 +459,7 @@ def execute_single_approach(approach, system_prompt, initial_query, client, mode
         if approach == 'none':
             # Use the request_config that was already prepared and passed to this function
             kwargs = request_config.copy() if request_config else {}
+            strip_optillm_proxy_keys(kwargs)
 
             # Remove items that are handled separately by the framework
             # Note: 'n' is NOT removed - the none_approach passes it to the client which handles multiple completions
@@ -720,7 +760,7 @@ def check_api_key():
 @app.route('/v1/chat/completions', methods=['POST'])
 def proxy():
     logger.info('Received request to /v1/chat/completions')
-    data = request.get_json()
+    data = normalize_request_data(request.get_json())
     auth_header = request.headers.get("Authorization")
     bearer_token = ""
 
@@ -742,8 +782,11 @@ def proxy():
     max_completion_tokens = data.get('max_completion_tokens')
     max_tokens = data.get('max_tokens')
 
-    # Explicit keys that we are already handling
-    explicit_keys = {'stream', 'messages', 'model', 'n', 'response_format', 'max_completion_tokens', 'max_tokens'}
+    # Explicit keys handled here; router tuning stays in request_config until after resolve.
+    explicit_keys = {
+        'stream', 'messages', 'model', 'n', 'response_format',
+        'max_completion_tokens', 'max_tokens',
+    } | (OPTILLM_PROXY_ONLY_KEYS - {"optillm_auto_router", "optillm_auto_router_effort"})
 
     # Copy the rest into request_config
     request_config = {k: v for k, v in data.items() if k not in explicit_keys}
@@ -789,6 +832,7 @@ def proxy():
         request_config=request_config,
         auto_router_enabled=server_config.get('auto_router_enabled', True),
         default_router_effort=server_config.get('auto_router_effort', 0.7),
+        default_router_min_confidence=server_config.get('auto_router_min_confidence', 0.30),
         known_approaches=known_approaches,
         plugin_approaches=plugin_approaches,
         parse_combined_approach=parse_combined_approach,
@@ -796,12 +840,16 @@ def proxy():
 
     if optillm_routing:
         logger.info(
-            "Approach routing: mode=%s resolved=%s confidence=%s source=%s",
+            "Approach routing: mode=%s resolved=%s confidence=%s source=%s top_scores=%s",
             optillm_routing.get('requested_mode'),
             optillm_routing.get('resolved_approach'),
             optillm_routing.get('confidence'),
             optillm_routing.get('source'),
+            optillm_routing.get('top_scores'),
         )
+
+    # Router may read optillm_auto_router* from request_config; strip before provider calls.
+    strip_optillm_proxy_keys(request_config)
 
     if resolved_approach not in ROUTING_MODES:
         model = f"{resolved_approach}-{model}"
@@ -1369,60 +1417,16 @@ def main():
     # Launch GUI if requested
     if server_config.get('launch_gui'):
         try:
-            import gradio as gr
-            # Start server in a separate thread
-            import threading
-            host = server_config['host']
-            server_thread = threading.Thread(target=app.run, kwargs={'host': host, 'port': port})
-            server_thread.daemon = True
-            server_thread.start()
+            from optillm.gui import launch_gradio_gui
 
-            # Configure the base URL for the Gradio interface
-            base_url = f"http://localhost:{port}/v1"
-            gui_port = int(os.environ.get("OPTILLM_GUI_PORT", 7860))
-            server_config["gui_url"] = f"http://{host}:{gui_port}"
-            logger.info(f"Launching Gradio interface connected to {base_url}")
-
-            # Create custom chat function with extended timeout
-            def chat_with_optillm(message, history):
-                import httpx
-                from openai import OpenAI
-
-                # Create client with extended timeout and no retries
-                custom_client = OpenAI(
-                    api_key="optillm",
-                    base_url=base_url,
-                    timeout=httpx.Timeout(1800.0, connect=5.0),  # 30 min timeout
-                    max_retries=0  # No retries - prevents duplicate requests
-                )
-
-                # Convert history to messages format
-                messages = []
-                for h in history:
-                    if h[0]:  # User message
-                        messages.append({"role": "user", "content": h[0]})
-                    if h[1]:  # Assistant message
-                        messages.append({"role": "assistant", "content": h[1]})
-                messages.append({"role": "user", "content": message})
-
-                # Make request
-                try:
-                    response = custom_client.chat.completions.create(
-                        model=server_config['model'],
-                        messages=messages
-                    )
-                    return response.choices[0].message.content
-                except Exception as e:
-                    return f"Error: {str(e)}"
-
-            # Create Gradio interface with queue for long operations
-            demo = gr.ChatInterface(
-                chat_with_optillm,
-                title="OptILLM Chat Interface",
-                description=f"Connected to OptILLM proxy at {base_url}"
+            launch_gradio_gui(
+                app,
+                server_config,
+                port,
+                server_config['host'],
+                known_approaches,
             )
-            demo.queue()  # Enable queue to handle long operations properly
-            demo.launch(server_name=host, server_port=gui_port, share=False)
+            return
         except ImportError:
             logger.error("Gradio is required for GUI. Install it with: pip install gradio")
             return

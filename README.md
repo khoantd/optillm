@@ -380,10 +380,11 @@ Non-streaming JSON completions include an extension field explaining the routing
 | `requested_mode` | `auto` or `predict` (omitted if routing was skipped) |
 | `resolved_approach` | Technique slug actually used |
 | `confidence` | Classifier softmax score for the chosen label |
+| `top_scores` | Optional top-k labels with confidences (when ML routing runs) |
 | `source` | `ml` or `fallback` (model load/inference failure or below `min_confidence`) |
 | `model` | Hugging Face id of the router weights |
 
-Server logs include the same fields (without prompt text), e.g. `Approach routing: mode=auto resolved=moa confidence=0.82 source=ml`.
+Server logs include the same fields (without prompt text), e.g. `Approach routing: mode=auto resolved=moa confidence=0.82 source=ml top_scores=[...]`. Predictor logs also print `top=label=0.xx, ...` and input character/turn counts (not message bodies).
 
 #### ML label coverage
 

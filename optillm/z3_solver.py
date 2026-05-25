@@ -15,6 +15,51 @@ from optillm import conversation_logger
 class TimeoutException(Exception):
     pass
 
+def _is_rational_call(func: ast.AST) -> bool:
+    if isinstance(func, ast.Name):
+        return func.id == "Rational"
+    if isinstance(func, ast.Attribute):
+        return func.attr == "Rational"
+    return False
+
+
+def _is_numeric_ast(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (int, float, complex))
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return _is_numeric_ast(node.operand)
+    return False
+
+
+class _SymbolicRationalFixer(ast.NodeTransformer):
+    """Rewrite ``Rational(p, q)`` with symbols to ``p / q`` (LLM misuse)."""
+
+    def visit_Call(self, node: ast.Call):
+        self.generic_visit(node)
+        if not _is_rational_call(node.func) or len(node.args) < 2:
+            return node
+        numer, denom = node.args[0], node.args[1]
+        if _is_numeric_ast(numer) and _is_numeric_ast(denom):
+            return node
+        if isinstance(numer, ast.Name) and isinstance(denom, ast.Name):
+            return ast.copy_location(
+                ast.BinOp(left=numer, op=ast.Div(), right=denom),
+                node,
+            )
+        return node
+
+
+def fix_symbolic_rational_calls(code: str) -> str:
+    """Fix LLM code that passes SymPy symbols to ``Rational``."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+    fixed = _SymbolicRationalFixer().visit(tree)
+    ast.fix_missing_locations(fixed)
+    return ast.unparse(fixed)
+
+
 def prepare_execution_globals():
     """
     Prepare globals dictionary for Z3/SymPy code execution.
@@ -127,10 +172,10 @@ def execute_code_in_process(code: str):
 
     execution_globals['Mod'] = Mod
 
-    def Rational(numerator, denominator=1):
+    def Z3Rational(numerator, denominator=1):
         return z3.Real(str(Fraction(numerator, denominator)))
 
-    execution_globals['Rational'] = Rational
+    execution_globals['Z3Rational'] = Z3Rational
 
     output_buffer = io.StringIO()
     with contextlib.redirect_stdout(output_buffer):
@@ -179,6 +224,10 @@ class Z3SymPySolverSystem:
 
 If Z3 or SymPy can be applied, provide Python code using the appropriate library (or both) to solve the problem. Make sure you define any additional methods you need for solving the problem.
 The code will be executed in an environment with Z3 and SymPy available, so do not include any other libraries or modules.
+
+Important SymPy rules:
+- For symbolic fractions use ``p/q``, not ``Rational(p, q)`` (``Rational`` is only for numeric literals like ``Rational(2, 3)``).
+- Use ``symbols('p q', integer=True)`` or separate ``symbols('p'); symbols('q')`` for multiple variables.
 
 Query: {query}
 
@@ -335,6 +384,8 @@ Response:
         except SyntaxError as e:
             logging.error(f"Syntax error in provided code: {e}")
             return f"Error: Syntax error: {e}"
+
+        code = fix_symbolic_rational_calls(code)
 
         # Execute the code in a separate process
         ctx = multiprocessing.get_context('spawn')

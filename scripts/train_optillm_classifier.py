@@ -38,7 +38,7 @@ class OptILMDataset(Dataset):
         ranks = self.ranks[idx]
         tokens = self.tokens[idx]
 
-        encoding = self.tokenizer.encode_plus(
+        encoding = self.tokenizer(
             prompt,
             add_special_tokens=True,
             max_length=MAX_LENGTH,

@@ -136,9 +136,23 @@ def reset_model_cache_for_testing() -> None:
     _load_failed = False
 
 
+def format_router_input(system_prompt: str, initial_query: str) -> str:
+    """
+    Build classifier text from server parse_conversation() output.
+
+    initial_query already uses ``User:`` / ``Assistant:`` tags per turn; do not
+    prepend another ``User:`` prefix (that duplicated tags and skewed routing).
+    """
+    sp = (system_prompt or "").strip()
+    iq = (initial_query or "").strip()
+    if sp and iq:
+        return f"{sp}\n\n{iq}"
+    return sp or iq
+
+
 def preprocess_input(tokenizer, system_prompt: str, initial_query: str):
-    combined_input = f"{system_prompt}\n\nUser: {initial_query}"
-    encoding = tokenizer.encode_plus(
+    combined_input = format_router_input(system_prompt, initial_query)
+    encoding = tokenizer(
         combined_input,
         add_special_tokens=True,
         max_length=MAX_LENGTH,
@@ -150,7 +164,7 @@ def preprocess_input(tokenizer, system_prompt: str, initial_query: str):
     return encoding["input_ids"], encoding["attention_mask"]
 
 
-def predict_approach(model, input_ids, attention_mask, device, effort: float = 0.7) -> Tuple[str, float]:
+def _predict_probabilities(model, input_ids, attention_mask, device, effort: float = 0.7):
     torch = _torch()
     F = _torch_F()
     model.eval()
@@ -159,7 +173,30 @@ def predict_approach(model, input_ids, attention_mask, device, effort: float = 0
         attention_mask = attention_mask.to(device)
         effort_tensor = torch.tensor([effort], dtype=torch.float).to(device)
         logits = model(input_ids, attention_mask=attention_mask, effort=effort_tensor)
-        probabilities = F.softmax(logits, dim=1)
-        predicted_index = torch.argmax(probabilities, dim=1).item()
-        confidence = probabilities[0][predicted_index].item()
-    return ML_APPROACHES[predicted_index], confidence
+        return F.softmax(logits, dim=1)[0]
+
+
+def predict_approach_topk(
+    model,
+    input_ids,
+    attention_mask,
+    device,
+    effort: float = 0.7,
+    top_k: int = 3,
+) -> Tuple[str, float, List[Tuple[str, float]]]:
+    """Return (best approach, best confidence, top-k [(approach, confidence), ...])."""
+    probabilities = _predict_probabilities(model, input_ids, attention_mask, device, effort)
+    k = min(top_k, len(ML_APPROACHES))
+    values, indices = probabilities.topk(k)
+    top_scores = [
+        (ML_APPROACHES[indices[i].item()], values[i].item()) for i in range(k)
+    ]
+    approach, confidence = top_scores[0]
+    return approach, confidence, top_scores
+
+
+def predict_approach(model, input_ids, attention_mask, device, effort: float = 0.7) -> Tuple[str, float]:
+    approach, confidence, _ = predict_approach_topk(
+        model, input_ids, attention_mask, device, effort=effort, top_k=1
+    )
+    return approach, confidence

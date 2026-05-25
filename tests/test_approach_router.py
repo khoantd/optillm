@@ -249,6 +249,63 @@ class TestApproachPredictorFallback(unittest.TestCase):
         self.assertEqual(decision.source, "fallback")
         self.assertFalse(decision.model_available)
 
+    @patch("optillm.approach_router.predictor.preprocess_input")
+    @patch("optillm.approach_router.predictor.predict_approach_topk")
+    @patch("optillm.approach_router.predictor.load_optillm_model")
+    def test_metadata_includes_top_scores(self, mock_load, mock_topk, mock_preprocess):
+        mock_load.return_value = (MagicMock(), MagicMock(), MagicMock())
+        mock_preprocess.return_value = (MagicMock(), MagicMock())
+        mock_topk.return_value = (
+            "moa",
+            0.82,
+            [("moa", 0.82), ("bon", 0.11), ("none", 0.05)],
+        )
+        decision = ApproachPredictor().predict(
+            "sys",
+            "User: hi",
+            requested_mode="auto",
+        )
+        meta = decision.to_metadata()
+        self.assertEqual(len(meta["top_scores"]), 3)
+        self.assertEqual(meta["top_scores"][0]["approach"], "moa")
+
+
+class TestFormatRouterInput(unittest.TestCase):
+    def test_no_double_user_prefix(self):
+        from optillm.approach_router.ml_router import format_router_input
+
+        combined = format_router_input("", "User: Prove sqrt(2) is irrational.")
+        self.assertEqual(combined, "User: Prove sqrt(2) is irrational.")
+        self.assertNotIn("User: User:", combined)
+
+    def test_system_and_tagged_conversation(self):
+        from optillm.approach_router.ml_router import format_router_input
+
+        iq = "User: first\nAssistant: ok\nUser: follow-up"
+        combined = format_router_input("You are helpful.", iq)
+        self.assertEqual(combined, "You are helpful.\n\n" + iq)
+
+
+class TestPreprocessInput(unittest.TestCase):
+    def test_uses_callable_tokenizer_api(self):
+        from optillm.approach_router.ml_router import preprocess_input
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.return_value = {
+            "input_ids": MagicMock(),
+            "attention_mask": MagicMock(),
+        }
+        input_ids, attention_mask = preprocess_input(
+            mock_tokenizer, "You are helpful.", "Solve 2+2"
+        )
+        mock_tokenizer.assert_called_once()
+        self.assertFalse(hasattr(mock_tokenizer, "encode_plus") and mock_tokenizer.encode_plus.called)
+        self.assertIs(input_ids, mock_tokenizer.return_value["input_ids"])
+        self.assertIs(attention_mask, mock_tokenizer.return_value["attention_mask"])
+        call_kwargs = mock_tokenizer.call_args.kwargs
+        self.assertEqual(call_kwargs["max_length"], 1024)
+        self.assertEqual(call_kwargs["return_tensors"], "pt")
+
 
 class TestMlRouterSingleton(unittest.TestCase):
     @patch("transformers.AutoTokenizer")
@@ -276,6 +333,48 @@ class TestRoutingModes(unittest.TestCase):
     def test_modes_defined(self):
         self.assertIn("auto", ROUTING_MODES)
         self.assertIn("predict", ROUTING_MODES)
+
+
+class TestAlgorithmDesignHeuristics(unittest.TestCase):
+    def test_detects_second_largest_on_algorithm(self):
+        from optillm.approach_router.heuristics import is_algorithm_design_task
+
+        q = (
+            "Design an O(n) algorithm to find the second-largest element "
+            "in an unsorted array."
+        )
+        self.assertTrue(is_algorithm_design_task(q))
+
+    def test_prove_without_big_o_stays_non_algorithm(self):
+        from optillm.approach_router.heuristics import is_algorithm_design_task
+
+        self.assertFalse(is_algorithm_design_task("Prove that sqrt(2) is irrational."))
+
+    @patch("optillm.approach_router.predictor.preprocess_input")
+    @patch("optillm.approach_router.predictor.predict_approach_topk")
+    @patch("optillm.approach_router.predictor.load_optillm_model")
+    def test_z3_overridden_for_algorithm_design(self, mock_load, mock_topk, mock_preprocess):
+        mock_load.return_value = (MagicMock(), MagicMock(), MagicMock())
+        mock_preprocess.return_value = (MagicMock(), MagicMock())
+        mock_topk.return_value = (
+            "z3",
+            0.27,
+            [
+                ("z3", 0.27),
+                ("bon", 0.11),
+                ("none", 0.09),
+                ("re2", 0.09),
+                ("mcts", 0.08),
+            ],
+        )
+        query = (
+            "User: Design an O(n) algorithm to find the second-largest element "
+            "in an unsorted array."
+        )
+        decision = ApproachPredictor().predict("", query, requested_mode="auto")
+        self.assertEqual(decision.approach, "none")
+        self.assertEqual(decision.source, "heuristic")
+        self.assertEqual(decision.override_reason, "algorithm_design_not_z3")
 
 
 if __name__ == "__main__":

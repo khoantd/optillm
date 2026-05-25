@@ -53,6 +53,7 @@ def resolve_optillm_approach(
     request_config: Optional[Dict[str, Any]],
     auto_router_enabled: bool,
     default_router_effort: float,
+    default_router_min_confidence: float = 0.30,
     known_approaches: List[str],
     plugin_approaches: Dict[str, Any],
     parse_combined_approach: Callable,
@@ -112,6 +113,8 @@ def resolve_optillm_approach(
             router_config = {"effort": request_config["optillm_auto_router_effort"]}
     if "effort" not in router_config:
         router_config["effort"] = default_router_effort
+    if "min_confidence" not in router_config:
+        router_config["min_confidence"] = default_router_min_confidence
 
     pred = predictor or ApproachPredictor()
     decision: RoutingDecision = pred.predict(
